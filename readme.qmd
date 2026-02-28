@@ -1,0 +1,252 @@
+---
+title: "Computer that plays the piano"
+author: "Luis Martinez"
+format: 
+  gfm:
+    output-file: "README.md" # Optional: common for GFM
+execute:
+  eval: false
+---
+
+
+# Project
+
+We are going to use a transformer model built in pytorch that can embedd notes from classical piano songs.
+
+Just like wordtovec exists, now we are going to try to do notetovec, the main idea is expose to the computer to a bunch of notes, chords, times, pitchs etc... so that in the process it may learn something about music composition.
+
+I am not an expert myself, so hopefully I can learn something as well.
+
+# Data Acquisition
+
+For the data acquisition I used one of my favorite youtube channels Rousseau go check him out  
+https://www.youtube.com/@Rousseau
+
+So for this we utilized a youtube library to make get requests for the videos and transform them into wav files, this with the idea that we can then decode this wav files in somethig called midi files, which we will get into later.
+
+So this is an example to get my favorite song in classical piano
+Claire de Lune from Claude Debussy
+
+```{python}
+import yt_dlp
+
+song = 'https://youtu.be/WNcsUNKlAKw?si=vovYNcurI1ppgGRt'
+
+ydl_opts = {
+    "format": "m4a/bestaudio/best",
+    "outtmpl": output_file,
+    "postprocessors": [{
+        "key": "FFmpegExtractAudio",
+        "preferredcodec": "wav",
+    }],
+}
+
+with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    ydl.download([song])
+
+```
+
+It is always a good time to listen to this song
+
+![Claire de Lune](clair_de_lune.wav)
+
+This file is a great way to vizualise how the wavelengths of the song appear through time, we can make very cool vizes with this file for example the amplitude of the piece.
+
+```{python}
+waveform, sample_rate = torchaudio.load("clair_de_lune.wav")
+
+waveform_np = waveform[0].numpy()
+num_frames = waveform_np.shape[0]
+time_axis = np.arange(0, num_frames) / sample_rate
+
+plt.figure(figsize=(12, 4))
+plt.plot(time_axis, waveform_np, color = 'royalblue', alpha = 0.8)
+plt.title('My Wave length')
+plt.xlabel('Time')
+plt.ylabel("Amplitude")
+plt.grid(True, alpha = 0.3)
+plt.savefig('wave.png')
+plt.show()
+```
+
+![Waves](wave.png)
+
+However, we are interested in the computer to learn how to play the piano.
+
+In order to do this we need to tell the computer what is which note in a piano can play, this is typicall done with vibrations since C,D,F,G,A,B have different "pitch" computer vision can be used by reading this graphs but we are not going to reinvent the wheel.
+
+For this we have MIDI files which we can use existing libraries to extract this files from the .wavs
+
+## MIDI Files
+
+A midi file is a music instrument digital interface, this is not an audio file but rather a list of events.
+
+- This stores note event
+- Note Duration
+- Note Velocity
+- Note aftertouch
+- Other controler parameters
+
+This is super powerful cause it will allow us to tokenize events to train a transformer and now it can learn something of music by simply guessing what is the next note.
+
+For this a spotify released model can be used called basic pitch
+
+
+```{python}
+from basic_pitch.inference import predict
+from basic_pitch import ICASSP_2022_MODEL_PATH
+
+model, mini_data, note_events = predict(
+    audio_path,
+    ICASSP_2022_MODEL_PATH)
+```
+
+I will not print here the output since it is very long
+
+# Transformer Model
+
+Why a transformer?, why embeddings?
+
+The model is not actually learning how to play the piano, it is only trying to guess the next token based on the tokens before but we are hoping that in the process of doing this it learns a thing or two about music.
+
+For this I scraped all the 32 audio files in the youtube channel and converted them into wav files. 
+
+```{python}
+from basic_pitch.inference import predict_and_save
+from basic_pitch import ICASSP_2022_MODEL_PATH
+music_location = "/content/drive/MyDrive/piano_project/midis"
+os.makedirs(music_location, exist_ok=True)
+
+for i, url in enumerate(songs):
+    song_id = f"piano_track_{i:02d}"
+    local_wav = f"/content/{song_id}.wav"
+
+    print(f"Processing {i+1}/{len(songs)}: {song_id}")
+
+    try:
+
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "outtmpl": f"/content/{song_id}",
+            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "wav"}],
+            "quiet": True,
+            "nocheckcertificate": True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        predict_and_save(['{local_wav}'], '{music_location}', save_midi=True, sonify_midi=False, save_model_outputs=False, save_notes=False, model_or_model_path=ICASSP_2022_MODEL_PATH)
+
+
+        if os.path.exists(local_wav):
+            os.remove(local_wav)
+
+        print(f"Success: {song_id} saved.")
+
+    except Exception as e:
+        print(f"Failed on {song_id}: {e}")
+```
+
+I also transformed the data, since it is scarce for a transformer, to have the same song but with sliding windows and increasing and decreasing the scale of the song.
+
+## Model Arquitecture
+
+I used pytorch to define the model like pancakes which is pretty easy to do.
+
+
+```{python}
+from torch import nn as nn
+import torch
+class MusicTransformer(nn.Module):
+    def __init__(self, vocab_size, d_model = 512):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, d_model)
+
+        self.pos_embedding = nn.Embedding(512, d_model)
+        
+        self.dropout = nn.Dropout(0.3)
+
+        encoder_layer = nn.TransformerEncoderLayer(
+                d_model = d_model,
+                nhead = 4,
+                dim_feedforward = 256,
+                batch_first = True,
+                dropout = 0.3)
+
+        self.transformer = nn.TransformerEncoder(
+                encoder_layer,
+                num_layers = 2)
+
+        self.fc = nn.Linear(d_model, vocab_size)
+
+    def forward(self, x):
+        seq_len = x.size(1)
+
+        positions = torch.arange(seq_len, device = x.device).unsqueeze(0)
+        x = self.embedding(x) + self.pos_embedding(positions)
+        
+        x = self.dropout(x)
+
+        x = self.transformer(x)
+
+        logits = self.fc(x)
+
+        return logits
+```
+
+This model is known as a "Decoder" this only means that its job is to try to predict the next note by only looking at the last x notes.
+
+Then the model was given a an initial token to see what type of melody it could generate.
+
+
+# Result
+
+This is a autoregressive model, this means that it predicts one musical token at a time and it is then fed back to the model for context for the next prediction.
+```{python}
+config = TokenizerConfig(
+    num_velocities=16,
+    use_chords=True,
+    use_programs = False
+)
+tokenizer = REMI(config)
+
+device = torch.device('cpu')
+model = MusicTransformer(vocab_size=len(tokenizer)).to(device)
+checkpoint = torch.load('best_model.pt', map_location=device)
+model.load_state_dict(checkpoint['model_state_dict'])
+model.eval()
+
+generated = [tokenizer.vocab['BOS_None']]
+
+for i in range(500):
+    x = torch.tensor([generated]).to(device)
+    
+    if x.size(1) > 511:
+        x = x[:, -511:]
+
+    with torch.no_grad():
+        logits = model(x)
+
+        next_token_logits = logits[0, -1, :] / 1.0
+
+        probs = F.softmax(next_token_logits, dim = -1)
+
+        next_token = torch.multinomial(probs, num_samples=1).item()
+
+        generated.append(next_token)
+
+    if i % 50 == 0:
+        print(f'Generated {i} / 500')
+
+
+midi_output = tokenizer.decode([generated])
+midi_output.dump_midi('generated_midi.mid') 
+```
+
+This is the result of the model
+
+![Generated song by Transformer](generated_song.wav)
+
+# Limitations
+
+This model is limited by the little amount of data I fed it, one alternative is use available datasets like google's MAESTRO data set that has over 1,000 midi files.
