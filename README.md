@@ -47,7 +47,7 @@ with yt_dlp.YoutubeDL(ydl_opts) as ydl:
 
 It is always a good time to listen to this song
 
-![Claire de Lune](clair_de_lune.wav)
+{{< audio src="clair_de_lune.wav" >}}
 
 This file is a great way to vizualise how the wavelengths of the song
 appear through time, we can make very cool vizes with this file for
